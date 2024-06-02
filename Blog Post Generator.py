@@ -74,13 +74,13 @@ config = dict(max_bootstrapped_demos=2, max_labeled_demos=2)
 
 # Optimize! In general, the metric is going to tell the optimizer how well it's doing.
 optimizer = BootstrapFewShot(metric=outline_metric, **config)
-optimized_cot = optimizer.compile(AbstractToOutline(), trainset=outline_trainset)
+optimized_outliner = optimizer.compile(AbstractToOutline(), trainset=outline_trainset)
 
 # COMMAND ----------
 
 # Evaluate the optimized model
 evaluate = Evaluate(devset=outline_testset[:5], metric=outline_metric, num_threads=4, display_progress=False, display_table=0)
-optimized_results = evaluate(optimized_cot)
+optimized_results = evaluate(optimized_outliner)
 print(optimized_results)
 
 # COMMAND ----------
@@ -135,12 +135,12 @@ print(baseline_paragraph_results)
 
 config = dict(max_bootstrapped_demos=3, max_labeled_demos=3)
 optimizer = BootstrapFewShot(metric=paragraph_metric, **config)
-optimized_paragraph_gen = optimizer.compile(SectionToParagraph(), trainset=paragraph_trainset)
+optimized_section_writer = optimizer.compile(SectionToParagraph(), trainset=paragraph_trainset)
 
 # COMMAND ----------
 
 evaluate = Evaluate(devset=paragraph_testset[:5], metric=paragraph_metric, num_threads=4, display_progress=False, display_table=0)
-optimized_paragraph_results = evaluate(optimized_paragraph_gen)
+optimized_paragraph_results = evaluate(optimized_section_writer)
 print(optimized_paragraph_results)
 
 # COMMAND ----------
@@ -150,20 +150,95 @@ print(f"% improvement: {improvement * 100}")
 
 # COMMAND ----------
 
-test_topic = 'Using Databricks and DSPy to create AI Systems'
-test_abstract = '''
+dspy_topic = 'Using Databricks and DSPy to create AI Systems'
+dspy_abstract = '''
 In this blog post, we'll outline our approach to taking a collection of thoughts about some customer problem and turning them into the draft of a blog post. We propose using tools like Databricks Foundation Models, DSPy, and datasets from annotations of previous blog posts to create an automated system which can produce rough drafts of blog posts in a matter of seconds. We hope a blog on this internal facing use case can provide helpful insights for customers aiming to provide value to their business using the tools mentioned. DSPy eliminates brittle, model-specific prompt engineering tasks and turns them into optimized language model systems. Foundation models are an extremely simple and quick way to access the latest open source large language models. Datasets formed using of previous blog posts can be used to fine tune the system. The focus should not be on the benefit to the Databricks field, it should be on which insights gleaned from this project that customers can leverage in their own pipelines to create more robust, production ready AI systems - insights such as how DSPy + foundation models are very simple to use for their own end to end AI processes, or how Databricks enables using unstructured data to build those processes on their data.
 '''
-test_outline_output = optimized_cot(test_abstract.strip()).outline
+dspy_outline_output = optimized_outliner(dspy_abstract.strip()).outline
 
 import re
 def parse_outline(outline):
     output = re.split(r'\n|\d+\.', outline)
     return [line.strip() for line in output if line.strip()]
 
-outline_sections = parse_outline(test_outline_output)
-test_paragraph_output = [optimized_paragraph_gen(section, test_topic) for section in outline_sections]
-print([output.paragraph for output in test_paragraph_output])
+outline_sections = parse_outline(dspy_outline_output)
+dspy_paragraph_output = [optimized_section_writer(section, dspy_topic) for section in outline_sections]
+print([output.paragraph for output in dspy_paragraph_output])
+
+# COMMAND ----------
+
+mlflow_topic = 'Using MLflow to predict the probability of multiple classes'
+mlflow_abstract = '''
+Databricks users often require extensions to the standard MLflow interfaces, such as logging artifacts alongside a model or altering the way it makes predictions. In this blog post, we'll describe an approach to using a custom MLflow model to predict the probability of multiple classes. First, we'll train a simple classification model on a dummy dataset. Next, we'll create a custom MLflow PyFunc model to wrap the initial model and return the top N classes and their probabilities. Finally, we'll deploy the model using MLflow and leverage it for inference.
+'''
+mlflow_outline_output = optimized_outliner(mlflow_abstract.strip()).outline
+
+import re
+def parse_outline(outline):
+    output = re.split(r'\n|\d+\.', outline)
+    return [line.strip() for line in output if line.strip()]
+
+outline_sections = parse_outline(mlflow_outline_output)
+mlflow_paragraph_output = [optimized_section_writer(section, mlflow_topic) for section in outline_sections]
+print(mlflow_outline_output)
+print("\n\n")
+print([output.paragraph for output in mlflow_paragraph_output])
+
+# COMMAND ----------
+
+# MAGIC %pip install mlflow
+# MAGIC import mlflow
+
+# COMMAND ----------
+
+outliner_save_path = '/Volumes/josh_melton/blogs/dspy_models/outliner.json'
+optimized_outliner.save(outliner_save_path)
+section_writer_save_path = '/Volumes/josh_melton/blogs/dspy_models/section_writer.json'
+optimized_section_writer.save(section_writer_save_path)
+
+# COMMAND ----------
+
+class DSPyWrapper(mlflow.pyfunc.PythonModel):
+    # define steps to initialize model
+    def load_context(self, context):
+        outliner = AbstractToOutline()
+        outliner.load(path=outliner_save_path)
+        self.outliner = outliner
+        section_writer = SectionToParagraph()
+        section_writer.load(path=section_writer_save_path)
+        self.section_writer = section_writer
+
+    def parse_outline(self, outline):
+        import re
+        output = re.split(r'\n|\d+\.', outline)
+        return [line.strip() for line in output if line.strip()]
+    
+    def draft_blog(self, row):
+        topic, abstract = row['topic'], row['abstract']
+        outline_output = self.outliner(abstract.strip()).outline
+        outline_sections = self.parse_outline(outline_output)
+        paragraph_output = [self.section_writer(section, topic).paragraph for section in outline_sections]
+        return pd.Series([outline_output, paragraph_output])
+
+    def predict(self, context, input_df):
+        output = input_df.apply(self.draft_blog, axis=1, result_type='expand')
+        output.columns = ['outline', 'paragraphs']
+        return output
+
+# COMMAND ----------
+
+with mlflow.start_run() as run:
+    mlflow.pyfunc.log_model(artifact_path="model", python_model=DSPyWrapper())
+
+# COMMAND ----------
+
+import pandas as pd
+loaded_model = mlflow.pyfunc.load_model(f'runs:/{run.info.run_id}/model')
+input_data = pd.DataFrame({
+    'topic': [dspy_topic, mlflow_topic],
+    'abstract': [dspy_abstract, mlflow_abstract],
+})
+display(loaded_model.predict(input_data))
 
 # COMMAND ----------
 
