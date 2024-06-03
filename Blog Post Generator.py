@@ -198,6 +198,11 @@ optimized_section_writer.save(section_writer_save_path)
 
 # COMMAND ----------
 
+import os
+os.environ['token'] = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
+
+# COMMAND ----------
+
 class DSPyWrapper(mlflow.pyfunc.PythonModel):
     # define steps to initialize model
     def load_context(self, context):
@@ -207,6 +212,15 @@ class DSPyWrapper(mlflow.pyfunc.PythonModel):
         section_writer = SectionToParagraph()
         section_writer.load(path=section_writer_save_path)
         self.section_writer = section_writer
+        self.dspy_setup()
+
+    def dspy_setup(self):
+        import dspy
+        import os
+        token = os.environ['token']
+        url = 'https://oregon.cloud.databricks.com/serving-endpoints'
+        lm = dspy.Databricks(model='databricks-meta-llama-3-70b-instruct', model_type='chat', api_key=token, api_base=url, max_tokens=1000)
+        dspy.settings.configure(lm=lm)
 
     def parse_outline(self, outline):
         import re
@@ -233,12 +247,37 @@ with mlflow.start_run() as run:
 # COMMAND ----------
 
 import pandas as pd
-loaded_model = mlflow.pyfunc.load_model(f'runs:/{run.info.run_id}/model')
+
+model_uri = f'runs:/{run.info.run_id}/model'
+loaded_model = mlflow.pyfunc.load_model(model_uri)
 input_data = pd.DataFrame({
     'topic': [dspy_topic, mlflow_topic],
     'abstract': [dspy_abstract, mlflow_abstract],
 })
-display(loaded_model.predict(input_data))
+response = loaded_model.predict(input_data)
+display(response)
+
+# COMMAND ----------
+
+from mlflow.models import infer_signature
+signature = infer_signature(input_data, response)
+with mlflow.start_run() as run:
+    mlflow.pyfunc.log_model(artifact_path="model", python_model=DSPyWrapper(), signature=signature, input_example=input_data)
+
+model_uri = f'runs:/{run.info.run_id}/model'
+loaded_model = mlflow.pyfunc.load_model(model_uri)
+input_data = pd.DataFrame({
+    'topic': [dspy_topic, mlflow_topic],
+    'abstract': [dspy_abstract, mlflow_abstract],
+})
+response = loaded_model.predict(input_data)
+display(response)
+
+# COMMAND ----------
+
+mlflow.set_registry_uri("databricks-uc")
+model_name = 'josh_melton.blogs.blog_post_drafter'
+result = mlflow.register_model(model_uri, name=model_name)
 
 # COMMAND ----------
 
